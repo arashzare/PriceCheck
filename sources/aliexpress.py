@@ -14,7 +14,7 @@ EXCLUDE_KEYWORDS = [
 def extract_coupon_discount(coupon_texts: List[str], base_price: float) -> Tuple[float, str]:
     """
     Parses coupons like 'C$6.00 off on C$45.00', 'C$40 off on C$300', 'Save C$50'
-    and calculates the exact discount amount.
+    AliExpress 'X off on Y' is a single-use discount applied once the order meets threshold Y.
     """
     total_discount = 0.0
     applied_note = ""
@@ -24,29 +24,24 @@ def extract_coupon_discount(coupon_texts: List[str], base_price: float) -> Tuple
             continue
         c_clean = c.replace("\xa0", " ").strip()
         
-        # Match "C$6.00 off on C$45.00" or "$6 off on $45" (Tiered discount)
+        # Match "C$6.00 off on C$45.00" or "$6 off on $45" -> Exact single tier discount
         match_tier = re.search(r"(?:C\$|\$|CA\$)?\s*(\d+(?:\.\d+)?)\s*off\s*on\s*(?:C\$|\$|CA\$)?\s*(\d+(?:\.\d+)?)", c_clean, re.IGNORECASE)
         if match_tier:
             off_amount = float(match_tier.group(1))
             tier_req = float(match_tier.group(2))
             if base_price >= tier_req and tier_req > 0:
-                multiplier = int(base_price // tier_req)
-                # AliExpress usually caps tiered discounts at around $60-$80 max per order
-                multiplier = min(multiplier, 10)
-                discount = off_amount * multiplier
-                if discount > total_discount:
-                    total_discount = discount
-                    applied_note = f"Coupon Applied: {c_clean} (-${discount:.2f} CAD)"
+                if off_amount > total_discount:
+                    total_discount = off_amount
+                    applied_note = f"Coupon: {c_clean} (-${off_amount:.2f} CAD)"
             continue
 
         # Match direct flat discounts: "Save $X", "Save C$X", "$X off"
         match_flat = re.search(r"(?:save|off)\s*(?:C\$|\$|CA\$)?\s*(\d+(?:\.\d+)?)", c_clean, re.IGNORECASE)
         if match_flat:
             discount = float(match_flat.group(1))
-            # Ignore bogus multi-hundred fake MSRP 'savings' (e.g. Save $500), only match real coupons < 150
             if 4.0 <= discount <= 120.0 and discount > total_discount:
                 total_discount = discount
-                applied_note = f"Coupon Applied: -${discount:.2f} CAD"
+                applied_note = f"Discount: -${discount:.2f} CAD"
 
     return total_discount, applied_note
 
@@ -61,10 +56,6 @@ def classify_model(title: str) -> str:
     return "Huawei Watch D Series"
 
 def inspect_product_page_for_coupons(context: BrowserContext, item_url: str, fallback_price: float) -> Tuple[float, float, str, str]:
-    """
-    Visits the direct product page to extract the EXACT displayed price and any product page coupons.
-    Returns: (exact_price, discount, coupon_note, shipping_text)
-    """
     page = context.new_page()
     try:
         page.goto(item_url, timeout=25000, wait_until="domcontentloaded")
@@ -78,9 +69,8 @@ def inspect_product_page_for_coupons(context: BrowserContext, item_url: str, fal
         price_match = re.search(r"(?:C\$|\$|CA\$)?\s*(\d{2,4}\.\d{2})", raw_price_str)
         exact_price = float(price_match.group(1)) if price_match else fallback_price
 
-        # 2. Extract coupons (e.g. 'C$6.00 off on C$45.00')
+        # 2. Extract coupons
         coupon_elements = soup.select("[class*='coupon'], [class*='promo'], [class*='voucher'], [class*='discount']")
-        # Also grab all text elements matching "off on"
         all_text = page.locator("text=/off on/i").all_inner_texts()
         coupon_texts = [c.get_text(" ", strip=True) for c in coupon_elements] + all_text
         
@@ -139,7 +129,6 @@ def scrape_aliexpress_search(context: BrowserContext, search_url: str, default_m
             if any(k in title_lower for k in EXCLUDE_KEYWORDS):
                 continue
 
-            # Parse rough base price
             price_matches = re.findall(r"(?:CA\s*|C\s*|\$)?\s*(\d{2,4}\.\d{2})", card_text)
             if not price_matches:
                 price_matches = re.findall(r"(?:CA\s*|C\s*|\$)?\s*(\d{2,4})", card_text)
@@ -159,8 +148,6 @@ def scrape_aliexpress_search(context: BrowserContext, search_url: str, default_m
 
         page.close()
 
-        # For the top candidate items, inspect the product page directly to extract coupons & exact price
-        print(f"[AliExpress] Inspecting {len(candidate_items[:6])} top product pages for coupons...")
         for title, base_price, direct_item_url in candidate_items[:6]:
             exact_price, discount, coupon_note, shipping_str = inspect_product_page_for_coupons(context, direct_item_url, base_price)
             
@@ -169,9 +156,9 @@ def scrape_aliexpress_search(context: BrowserContext, search_url: str, default_m
 
             actual_model = classify_model(title)
             
-            details_str = f"Listed: ${exact_price:.2f} CAD"
+            details_str = f"Subtotal: ${exact_price:.2f} CAD"
             if discount > 0:
-                details_str += f" | {coupon_note} -> Checkout Total: ${final_price:.2f} CAD"
+                details_str += f" | {coupon_note} -> Final Checkout: ${final_price:.2f} CAD"
             else:
                 details_str += " | Free Shipping to Canada"
 
