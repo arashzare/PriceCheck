@@ -41,7 +41,17 @@ def extract_coupon_discount(coupon_texts: List[str], base_price: float) -> Tuple
 
     return total_discount, applied_note
 
-def scrape_aliexpress_search(context: BrowserContext, search_url: str, model_name: str) -> List[Deal]:
+def classify_model(title: str) -> str:
+    title_lower = title.lower()
+    if "d3" in title_lower or "watch d 3" in title_lower or "watch d3" in title_lower:
+        return "Huawei Watch D3"
+    elif "d2" in title_lower or "watch d 2" in title_lower or "watch d2" in title_lower:
+        return "Huawei Watch D2"
+    elif "watch d" in title_lower:
+        return "Huawei Watch D (Gen 1)"
+    return "Huawei Watch D Series"
+
+def scrape_aliexpress_search(context: BrowserContext, search_url: str, default_model: str) -> List[Deal]:
     deals: List[Deal] = []
     page = context.new_page()
     try:
@@ -77,18 +87,25 @@ def scrape_aliexpress_search(context: BrowserContext, search_url: str, model_nam
 
             title_lower = title.lower()
 
-            if "watch" not in title_lower or ("d2" not in title_lower and "d3" not in title_lower and "watch d" not in title_lower):
+            if "watch" not in title_lower or ("watch d" not in title_lower and "d2" not in title_lower and "d3" not in title_lower):
                 continue
             if any(k in title_lower for k in EXCLUDE_KEYWORDS):
                 continue
 
+            # Accurate Model Identification (D vs D2 vs D3)
+            actual_model = classify_model(title)
+
             direct_item_url = f"https://www.aliexpress.com/item/{item_id}.html"
 
-            price_matches = re.findall(r"(?:CA\s*|C\s*|\$)?\s*(\d{2,4}(?:\.\d{2})?)", card_text)
+            # Parse precise prices with exact decimal cents (e.g. C$496.03)
+            price_matches = re.findall(r"(?:CA\s*|C\s*|\$)?\s*(\d{2,4}\.\d{2})", card_text)
+            if not price_matches:
+                price_matches = re.findall(r"(?:CA\s*|C\s*|\$)?\s*(\d{2,4})", card_text)
+
             raw_price = 0.0
             for pm in price_matches:
                 v = float(pm)
-                if 220.0 <= v <= 1200.0:
+                if 200.0 <= v <= 1200.0:
                     raw_price = v
                     break
 
@@ -111,7 +128,7 @@ def scrape_aliexpress_search(context: BrowserContext, search_url: str, model_nam
                 details_str += " | Free Shipping to Canada"
 
             deals.append(Deal(
-                model=model_name,
+                model=actual_model,
                 title=title[:90],
                 store="AliExpress",
                 item_price_cad=round(final_price_after_coupon, 2),
@@ -119,7 +136,7 @@ def scrape_aliexpress_search(context: BrowserContext, search_url: str, model_nam
                 total_price_cad=round(total_landed, 2),
                 url=direct_item_url,
                 is_global_version="global" in title_lower or "original" in title_lower,
-                condition="Brand New",
+                condition="Brand New" if "98new" not in title_lower else "Open Box / 98% New",
                 details=details_str
             ))
     except Exception as e:
