@@ -1,124 +1,95 @@
-import re
-import json
-import requests
+from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
-from typing import List
+import re
 from sources.models import Deal
 from sources.currency import convert_to_cad
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-CA,en-US;q=0.9,en;q=0.8",
-    "Cookie": "aep_usuc_f=region=CA&site=glo&b_locale=en_US&c_tp=CAD;"
-}
+EXCLUDE_KEYWORDS = [
+    "strap", "band", "protector", "film", "case", "cover", "cable",
+    "charger", "charging dock", "replacement", "silicone", "leather band",
+    "bezel", "tempered glass", "bracket", "airbag strap", "wrist strap", "remote"
+]
 
-def parse_price_str(text: str) -> float:
+def parse_price(text: str) -> float:
     if not text:
         return 0.0
-    clean = text.replace(",", "")
+    clean = text.replace(",", "").replace("\xa0", " ")
     match = re.search(r"(\d+(?:\.\d+)?)", clean)
     if match:
         return float(match.group(1))
     return 0.0
 
-def search_aliexpress_model(query: str, model_name: str) -> List[Deal]:
-    """
-    Searches AliExpress for Huawei Watch D2/D3 Global version with ship to Canada.
-    """
-    deals: List[Deal] = []
-    encoded = requests.utils.quote(query)
-    url = f"https://www.aliexpress.com/w/wholesale-{encoded}.html?page=1&sortType=price_asc&shipFromCountry=all"
-
+def scrape_aliexpress_search(context, search_url: str, model_name: str):
+    deals = []
+    page = context.new_page()
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=12)
-        if resp.status_code != 200:
-            return deals
+        page.goto("https://www.aliexpress.com", timeout=30000)
+        page.context.add_cookies([
+            {"name": "aep_usuc_f", "value": "region=CA&site=glo&b_locale=en_US&c_tp=CAD", "domain": ".aliexpress.com", "path": "/"}
+        ])
+        page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
+        page.wait_for_timeout(3500)
+        page.evaluate("window.scrollBy(0, 1200)")
+        page.wait_for_timeout(2000)
 
-        # Look for window._dida_config_ or raw product cards
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(page.content(), "lxml")
         
-        # Check script JSON tags for modern AliExpress client-side hydration data
-        scripts = soup.find_all("script")
-        for s in scripts:
-            script_text = s.string or ""
-            if "itemList" in script_text or "products" in script_text or "pageData" in script_text:
-                matches = re.findall(r'"title":\{"displayTitle":"(.*?)"\}.*?"price":\{"appPriceFormatted":"(.*?)"\}', script_text)
-                for title, price_str in matches:
-                    title_lower = title.lower()
-                    if "watch" not in title_lower or ("d2" not in title_lower and "d3" not in title_lower):
-                        continue
-                    if any(x in title_lower for x in ["strap", "band", "case", "film", "cover", "protector"]):
-                        continue
-                    
-                    price_val = parse_price_str(price_str)
-                    if price_val < 150:
-                        continue
-                    
-                    # Estimate free or ~$10 CAD shipping for AliExpress standard
-                    shipping_cad = 0.0
-                    deals.append(Deal(
-                        model=model_name,
-                        title=title,
-                        store="AliExpress",
-                        item_price_cad=price_val,
-                        shipping_price_cad=shipping_cad,
-                        total_price_cad=price_val + shipping_cad,
-                        url=url,
-                        is_global_version="global" in title_lower,
-                        condition="Brand New",
-                        details="AliExpress Global Listing (Standard Shipping to Canada included)"
-                    ))
+        # Parse search cards
+        cards = soup.select("a[href*='/item/']")
+        seen_items = set()
 
-        # Also fallback HTML parsing
-        cards = soup.select(".search-card-item, .list--gallery--34mggGX, a[class*='search-card-item']")
-        for card in cards:
-            title_el = card.select_one("h1, h3, [class*='title'], .multi--titleText--1QXePa2")
-            if not title_el:
+        for a in cards:
+            href = a.get("href", "")
+            match_id = re.search(r"/item/(\d+)\.html", href)
+            if not match_id:
                 continue
-            title = title_el.get_text(strip=True)
+            item_id = match_id.group(1)
+            if item_id in seen_items:
+                continue
+            seen_items.add(item_id)
+
+            card_parent = a.find_parent("div", class_=re.compile(r"search-card-item|list--gallery|card--")) or a
+            card_text = card_parent.get_text(" ", strip=True)
+            title = a.get_text(" ", strip=True)
+            if len(title) < 15:
+                title = card_text
+
             title_lower = title.lower()
 
-            if "watch" not in title_lower or ("d2" not in title_lower and "d3" not in title_lower):
+            if "watch" not in title_lower or ("d2" not in title_lower and "d3" not in title_lower and "watch d" not in title_lower):
                 continue
-            if any(x in title_lower for x in ["strap", "band", "case", "film", "cover"]):
-                continue
-
-            price_el = card.select_one("[class*='price'], [class*='salePrice']")
-            if not price_el:
+            if any(k in title_lower for k in EXCLUDE_KEYWORDS):
                 continue
 
-            price_val = parse_price_str(price_el.get_text(strip=True))
-            if price_val < 150:
+            # Look for price in card
+            price_matches = re.findall(r"(?:CA\s*|C\s*|\$)?\s*(\d{2,4}(?:\.\d{2})?)", card_text)
+            price_val = 0.0
+            for pm in price_matches:
+                v = float(pm)
+                if 200.0 <= v <= 1200.0:  # Valid watch price range
+                    price_val = v
+                    break
+
+            if price_val < 180.0:
                 continue
 
-            link_el = card if card.name == "a" else card.select_one("a")
-            link = link_el["href"] if (link_el and "href" in link_el.attrs) else url
-            if link.startswith("//"):
-                link = "https:" + link
+            clean_link = f"https://www.aliexpress.com/item/{item_id}.html"
+            shipping_cad = 0.0  # Most global stores offer free shipping to Canada
 
             deals.append(Deal(
                 model=model_name,
-                title=title,
+                title=title[:90],
                 store="AliExpress",
-                item_price_cad=price_val,
-                shipping_price_cad=0.0,
-                total_price_cad=price_val,
-                url=link,
-                is_global_version="global" in title_lower,
+                item_price_cad=round(price_val, 2),
+                shipping_price_cad=shipping_cad,
+                total_price_cad=round(price_val + shipping_cad, 2),
+                url=clean_link,
+                is_global_version="global" in title_lower or "original" in title_lower,
                 condition="Brand New",
-                details="AliExpress Listing with CAD pricing & standard Canada shipping"
+                details="AliExpress Direct Listing (Ships to Canada)"
             ))
-
     except Exception as e:
         print(f"[AliExpress] Error: {e}")
-
+    finally:
+        page.close()
     return deals
-
-def fetch_aliexpress_deals() -> List[Deal]:
-    results = []
-    print("[AliExpress] Checking Huawei Watch D2 Global...")
-    results.extend(search_aliexpress_model("huawei watch d2 global", "Huawei Watch D2"))
-    print("[AliExpress] Checking Huawei Watch D3 Global...")
-    results.extend(search_aliexpress_model("huawei watch d3 global", "Huawei Watch D3"))
-    return results
