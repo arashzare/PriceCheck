@@ -10,11 +10,11 @@ from sources.importers import fetch_importer_deals
 from sources.notifier import dispatch_notifications
 
 def run_tracker():
-    target_price_str = os.getenv("TARGET_PRICE_CAD", "420.0")
+    target_price_str = os.getenv("TARGET_PRICE_CAD", "400.0")
     try:
         target_price_cad = float(target_price_str)
     except ValueError:
-        target_price_cad = 420.0
+        target_price_cad = 400.0
 
     print("=" * 70)
     print("  HUAWEI WATCH D2 / D3 DAILY PRICE & DEAL TRACKER (CANADA)")

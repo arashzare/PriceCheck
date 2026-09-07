@@ -28,7 +28,7 @@ jobs:
 
       - name: Run Daily Price & Deal Checker
         env:
-          TARGET_PRICE_CAD: ${{ secrets.TARGET_PRICE_CAD || '420.0' }}
+          TARGET_PRICE_CAD: ${{ secrets.TARGET_PRICE_CAD || '400.0' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
